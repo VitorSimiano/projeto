@@ -7,6 +7,8 @@ use App\Models\Produto;
 use App\Services\PedidoPaymentService;
 use App\Strategies\CreditCardStrategy;
 use App\Strategies\PixStrategy;
+use App\Factories\PedidoBalcaoFactory;
+use App\Factories\PedidoDeliveryFactory;
 use Illuminate\Http\Request;
 
 class PedidoController extends Controller
@@ -30,41 +32,53 @@ class PedidoController extends Controller
         return Pedido::with('cliente', 'produtos')->findOrFail($id);
     }
 
-    // Criar pedido
+    // Criar pedido (usando Factory Method)
     public function store(Request $request)
     {
         $request->validate([
             'cliente_id' => 'required|exists:clientes,id',
+            'tipo' => 'required|in:balcao,delivery',
             'produtos' => 'required|array',
             'produtos.*.produto_id' => 'required|exists:produtos,id',
             'produtos.*.quantidade' => 'required|integer|min:1',
         ]);
 
-        $pedido = Pedido::create([
-            'cliente_id' => $request->cliente_id,
-            'total' => 0, // será calculado abaixo
-        ]);
-
+        // Calcula o total dos produtos
         $total = 0;
         foreach ($request->produtos as $item) {
             $produto = Produto::findOrFail($item['produto_id']);
-            $preco = $produto->preco;
-            $quantidade = $item['quantidade'];
-
-            $pedido->produtos()->attach($produto->id, [
-                'quantidade' => $quantidade,
-                'preco_unitario' => $preco,
-            ]);
-
-            $total += $preco * $quantidade;
+            $total += $produto->preco * $item['quantidade'];
         }
 
-        $pedido->update(['total' => $total]);
+        // Dados iniciais do pedido
+        $dadosPedido = [
+            'cliente_id' => $request->cliente_id,
+            'total' => $total,
+            'status' => 'pendente',
+        ];
+
+        // Escolhe a fábrica de acordo com o tipo de pedido
+        $factory = match ($request->tipo) {
+            'balcao' => new PedidoBalcaoFactory(),
+            'delivery' => new PedidoDeliveryFactory(),
+            default => throw new \InvalidArgumentException('Tipo de pedido inválido')
+        };
+
+        // Cria o pedido via Factory Method
+        $pedido = $factory->criarPedido($dadosPedido);
+
+        // Relaciona os produtos ao pedido
+        foreach ($request->produtos as $item) {
+            $produto = Produto::findOrFail($item['produto_id']);
+            $pedido->produtos()->attach($produto->id, [
+                'quantidade' => $item['quantidade'],
+                'preco_unitario' => $produto->preco,
+            ]);
+        }
 
         return response()->json($pedido->load('cliente', 'produtos'), 201);
     }
 
-    // Atualizar status do pedido
     // Processar pagamento do pedido
     public function processPayment(Request $request, $id)
     {
@@ -110,6 +124,7 @@ class PedidoController extends Controller
         }
     }
 
+    // Atualizar status do pedido
     public function update(Request $request, $id)
     {
         $pedido = Pedido::findOrFail($id);
